@@ -7,6 +7,7 @@ import re
 import pandas as pd
 import io
 import json
+import sys
 from fpdf import FPDF
 from docx import Document
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -122,10 +123,25 @@ def extract_text_from_file(uploaded_file):
     try:
         file_type = uploaded_file.type
         
+        # Reset file pointer to beginning
+        uploaded_file.seek(0)
+        
         if file_type == "text/plain":
             # Arquivo TXT
-            text = str(uploaded_file.read(), "utf-8")
-            return text
+            try:
+                # Try to read as bytes first, then decode
+                content = uploaded_file.read()
+                if isinstance(content, (bytes, bytearray)):
+                    text = content.decode("utf-8")
+                else:
+                    text = str(content)
+                return text
+            except UnicodeDecodeError:
+                # Try with latin-1 encoding if utf-8 fails
+                uploaded_file.seek(0)
+                content = uploaded_file.read()
+                text = content.decode("latin-1")
+                return text
         
         elif file_type == "application/pdf":
             # Arquivo PDF
@@ -134,10 +150,25 @@ def extract_text_from_file(uploaded_file):
                 return None
                 
             try:
-                pdf_reader = PyPDF2.PdfReader(uploaded_file)
+                # Create a BytesIO object from uploaded file
+                pdf_bytes = uploaded_file.read()
+                pdf_file = io.BytesIO(pdf_bytes)
+                pdf_reader = PyPDF2.PdfReader(pdf_file)
+                
                 text = ""
                 for page in pdf_reader.pages:
-                    text += page.extract_text() + "\n"
+                    try:
+                        page_text = page.extract_text()
+                        if page_text:
+                            text += page_text + "\n"
+                    except Exception as page_error:
+                        st.warning(f"⚠️ Erro ao extrair texto da página: {str(page_error)}")
+                        continue
+                
+                if not text.strip():
+                    st.warning("⚠️ Nenhum texto foi extraído do PDF. O arquivo pode conter apenas imagens.")
+                    return None
+                    
                 return text
             except Exception as e:
                 st.error(f"❌ Erro ao processar PDF: {str(e)}")
@@ -150,10 +181,27 @@ def extract_text_from_file(uploaded_file):
                 return None
                 
             try:
-                doc = DocxDocument(uploaded_file)
+                # Create a BytesIO object from uploaded file
+                docx_bytes = uploaded_file.read()
+                docx_file = io.BytesIO(docx_bytes)
+                doc = DocxDocument(docx_file)
+                
                 text = ""
                 for paragraph in doc.paragraphs:
-                    text += paragraph.text + "\n"
+                    if paragraph.text.strip():
+                        text += paragraph.text + "\n"
+                
+                # Also extract text from tables if any
+                for table in doc.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            if cell.text.strip():
+                                text += cell.text + "\n"
+                
+                if not text.strip():
+                    st.warning("⚠️ Nenhum texto foi encontrado no documento DOCX.")
+                    return None
+                    
                 return text
             except Exception as e:
                 st.error(f"❌ Erro ao processar DOCX: {str(e)}")
@@ -171,6 +219,7 @@ def extract_text_from_file(uploaded_file):
             
     except Exception as e:
         st.error(f"❌ Erro ao processar arquivo: {str(e)}")
+        st.error(f"Detalhes técnicos: {type(e).__name__}")
         return None
 
 def extract_percentage(text):
@@ -240,16 +289,65 @@ Estudo de Impacto Financeiro - Proposta de Reajuste Salarial
     """
 
 def create_pdf_report(texto):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", size=12)
-    # Codificar o texto para latin-1
-    texto_encoded = texto.encode('latin-1', 'replace').decode('latin-1')
-    pdf.multi_cell(0, 10, txt=texto_encoded)
-    pdf_output = io.BytesIO()
-    pdf_output.write(pdf.output(dest='S').encode('latin1'))
-    pdf_output.seek(0)
-    return pdf_output.getvalue()
+    """Cria relatório em PDF com tratamento de encoding robusto"""
+    try:
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", size=10)
+        
+        # Limpar e preparar o texto
+        texto_limpo = texto.replace('\r\n', '\n').replace('\r', '\n')
+        
+        # Tentar diferentes encodings
+        try:
+            # Primeiro tenta latin-1 (mais compatível com FPDF)
+            texto_encoded = texto_limpo.encode('latin-1', 'replace').decode('latin-1')
+        except:
+            try:
+                # Se falhar, tenta utf-8 com replacement
+                texto_encoded = texto_limpo.encode('utf-8', 'replace').decode('utf-8')
+                # Remove caracteres problemáticos
+                texto_encoded = ''.join(char if ord(char) < 256 else '?' for char in texto_encoded)
+            except:
+                # Último recurso: apenas ASCII
+                texto_encoded = ''.join(char if ord(char) < 128 else '?' for char in texto_limpo)
+        
+        # Adicionar texto ao PDF
+        for linha in texto_encoded.split('\n'):
+            if linha.strip():
+                try:
+                    pdf.cell(0, 6, linha[:150], ln=True)  # Limita tamanho da linha
+                except:
+                    # Se der erro na linha, pula
+                    continue
+        
+        # Gerar PDF
+        pdf_output = io.BytesIO()
+        pdf_string = pdf.output(dest='S')
+        
+        if isinstance(pdf_string, str):
+            pdf_output.write(pdf_string.encode('latin-1'))
+        else:
+            pdf_output.write(pdf_string)
+            
+        pdf_output.seek(0)
+        return pdf_output.getvalue()
+        
+    except Exception as e:
+        st.error(f"❌ Erro ao gerar PDF: {str(e)}")
+        # Retorna PDF vazio em caso de erro
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", size=12)
+        pdf.cell(0, 10, "Erro ao gerar relatorio. Use a opcao Word.", ln=True)
+        pdf_output = io.BytesIO()
+        pdf_string = pdf.output(dest='S')
+        if isinstance(pdf_string, str):
+            pdf_output.write(pdf_string.encode('latin-1'))
+        else:
+            pdf_output.write(pdf_string)
+        pdf_output.seek(0)
+        return pdf_output.getvalue()
 
 def create_word_report(texto):
     doc = Document()
@@ -474,6 +572,17 @@ else:  # Upload de arquivo
                 )
         else:
             st.error("❌ Não foi possível extrair texto do arquivo.")
+            
+            # Oferecer alternativa manual
+            st.info("💡 **Alternativa**: Copie o conteúdo do arquivo e cole na área de texto abaixo:")
+            texto_manual = st.text_area(
+                "Cole o texto do documento aqui:",
+                height=200,
+                help="Como alternativa, copie e cole o conteúdo do documento manualmente"
+            )
+            if texto_manual.strip():
+                texto = texto_manual
+                st.success("✅ Texto inserido manualmente!")
     
     # Área de texto adicional para edições
     if uploaded_file is not None and texto:
@@ -617,3 +726,40 @@ st.markdown("""
     <small>Sistema de Análise de Impacto Financeiro | Desenvolvido para auxiliar na análise de projetos de lei conforme a LRF</small>
 </div>
 """, unsafe_allow_html=True)
+
+# Debug info for Streamlit Share
+if st.checkbox("🔧 Mostrar informações de debug", value=False):
+    st.markdown("### 🔧 Informações de Debug")
+    st.write(f"**Streamlit version**: {st.__version__}")
+    st.write(f"**Python version**: {sys.version}")
+    
+    # Test dependencies
+    deps_status = {}
+    try:
+        import PyPDF2
+        deps_status['PyPDF2'] = f"✅ {PyPDF2.__version__}"
+    except:
+        deps_status['PyPDF2'] = "❌ Não disponível"
+    
+    try:
+        from docx import __version__ as docx_version
+        deps_status['python-docx'] = f"✅ {docx_version}"
+    except:
+        try:
+            import docx
+            deps_status['python-docx'] = "✅ Instalado (versão desconhecida)"
+        except:
+            deps_status['python-docx'] = "❌ Não disponível"
+    
+    try:
+        from fpdf import __version__ as fpdf_version
+        deps_status['fpdf2'] = f"✅ {fpdf_version}"
+    except:
+        try:
+            import fpdf
+            deps_status['fpdf2'] = "✅ Instalado (versão desconhecida)"
+        except:
+            deps_status['fpdf2'] = "❌ Não disponível"
+    
+    for dep, status in deps_status.items():
+        st.write(f"**{dep}**: {status}")
