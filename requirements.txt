@@ -1,0 +1,7 @@
+streamlit
+langchain
+langchain-google-genai
+python-dotenv
+pandas
+fpdf # Nova dependência para PDF
+python-docx # Nova dependência para Word
