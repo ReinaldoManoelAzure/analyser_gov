@@ -1,7 +1,15 @@
-streamlit
-langchain
-langchain-google-genai
-python-dotenv
-pandas
-fpdf # Nova dependência para PDF
-python-docx # Nova dependência para Word
+# Core dependencies
+streamlit>=1.28.0
+python-dotenv>=1.0.0
+pandas>=1.5.0
+
+# LangChain and Google AI
+langchain>=0.1.0
+langchain-google-genai>=1.0.0
+
+# Document processing
+PyPDF2>=3.0.0
+python-docx>=0.8.11
+
+# PDF generation
+fpdf2>=2.7.0
