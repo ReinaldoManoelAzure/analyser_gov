@@ -13,6 +13,19 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 
+# Importações opcionais para processamento de arquivos
+try:
+    import PyPDF2
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
+
+try:
+    from docx import Document as DocxDocument
+    DOCX_AVAILABLE = True
+except ImportError:
+    DOCX_AVAILABLE = False
+
 # Carregar variáveis de ambiente
 env_path = ".env"
 load_dotenv(env_path)
@@ -104,6 +117,62 @@ def get_adjustment_suggestion_chain():
 
 
 # --- UTILITÁRIOS ---
+def extract_text_from_file(uploaded_file):
+    """Extrai texto de diferentes tipos de arquivo"""
+    try:
+        file_type = uploaded_file.type
+        
+        if file_type == "text/plain":
+            # Arquivo TXT
+            text = str(uploaded_file.read(), "utf-8")
+            return text
+        
+        elif file_type == "application/pdf":
+            # Arquivo PDF
+            if not PDF_AVAILABLE:
+                st.error("⚠️ Para ler arquivos PDF, instale: `pip install PyPDF2`")
+                return None
+                
+            try:
+                pdf_reader = PyPDF2.PdfReader(uploaded_file)
+                text = ""
+                for page in pdf_reader.pages:
+                    text += page.extract_text() + "\n"
+                return text
+            except Exception as e:
+                st.error(f"❌ Erro ao processar PDF: {str(e)}")
+                return None
+        
+        elif file_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+            # Arquivo DOCX
+            if not DOCX_AVAILABLE:
+                st.error("⚠️ Para ler arquivos DOCX, instale: `pip install python-docx`")
+                return None
+                
+            try:
+                doc = DocxDocument(uploaded_file)
+                text = ""
+                for paragraph in doc.paragraphs:
+                    text += paragraph.text + "\n"
+                return text
+            except Exception as e:
+                st.error(f"❌ Erro ao processar DOCX: {str(e)}")
+                return None
+        
+        elif file_type == "application/msword":
+            # Arquivo DOC (mais limitado)
+            st.warning("⚠️ Arquivos .doc não são totalmente suportados. Use .docx ou .txt")
+            return None
+        
+        else:
+            st.error(f"⚠️ Tipo de arquivo não suportado: {file_type}")
+            st.info("Formatos aceitos: .txt, .pdf, .docx")
+            return None
+            
+    except Exception as e:
+        st.error(f"❌ Erro ao processar arquivo: {str(e)}")
+        return None
+
 def extract_percentage(text):
     match = re.search(r'(\d+(\.\d+)?)%', text)
     if match:
@@ -322,20 +391,123 @@ with st.sidebar:
     
     st.markdown("## 📋 Como usar")
     st.markdown("""
-    1. Cole o texto do projeto de lei
+    1. **Entrada de dados:**
+       - Digite/cole o texto OU
+       - Faça upload de arquivo (.txt, .pdf, .docx)
     2. Informe o gasto atual com pessoal
     3. Clique em "Analisar"
     4. Baixe os relatórios se necessário
     """)
-
+    
+    st.markdown("## 📁 Formatos Suportados")
+    st.markdown("""
+    - **TXT:** Texto simples
+    - **PDF:** Documentos Adobe
+    - **DOCX:** Microsoft Word
+    
+    ⚠️ **Nota:** Para usar PDF/DOCX, instale:
+    ```
+    pip install PyPDF2 python-docx
+    ```
+    """)
+    
+    st.markdown("---")
+    st.markdown("**💡 Dica:** Você pode editar o texto extraído antes da análise!")
 # Input principal
 st.markdown("## 📝 Entrada de Dados")
 
-texto = st.text_area(
-    "Cole aqui o texto do projeto de lei:", 
-    height=200,
-    help="Cole o texto completo do projeto de lei que você deseja analisar"
+# Opções de entrada
+input_method = st.radio(
+    "Escolha o método de entrada:",
+    ["✍️ Digitar texto", "📁 Upload de arquivo"],
+    horizontal=True
 )
+
+texto = ""
+
+if input_method == "✍️ Digitar texto":
+    texto = st.text_area(
+        "Cole aqui o texto do projeto de lei:", 
+        height=200,
+        help="Cole o texto completo do projeto de lei que você deseja analisar"
+    )
+
+else:  # Upload de arquivo
+    st.markdown("### 📁 Upload de Arquivo")
+    
+    uploaded_file = st.file_uploader(
+        "Escolha um arquivo",
+        type=['txt', 'pdf', 'docx'],
+        help="Formatos suportados: .txt, .pdf, .docx"
+    )
+    
+    if uploaded_file is not None:
+        # Mostrar informações do arquivo
+        file_details = {
+            "Nome": uploaded_file.name,
+            "Tipo": uploaded_file.type,
+            "Tamanho": f"{uploaded_file.size / 1024:.2f} KB"
+        }
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.info(f"📄 **Nome:** {file_details['Nome']}")
+        with col2:
+            st.info(f"🔧 **Tipo:** {uploaded_file.type.split('/')[-1].upper()}")
+        with col3:
+            st.info(f"📊 **Tamanho:** {file_details['Tamanho']}")
+        
+        # Extrair texto do arquivo
+        with st.spinner("📖 Extraindo texto do arquivo..."):
+            texto = extract_text_from_file(uploaded_file)
+        
+        if texto:
+            st.success(f"✅ Texto extraído com sucesso! ({len(texto)} caracteres)")
+            
+            # Mostrar prévia do texto
+            with st.expander("👀 Prévia do texto extraído"):
+                st.text_area(
+                    "Conteúdo do arquivo:",
+                    value=texto[:1000] + ("..." if len(texto) > 1000 else ""),
+                    height=150,
+                    disabled=True
+                )
+        else:
+            st.error("❌ Não foi possível extrair texto do arquivo.")
+    
+    # Área de texto adicional para edições
+    if uploaded_file is not None and texto:
+        st.markdown("### ✏️ Edição (Opcional)")
+        texto_editado = st.text_area(
+            "Você pode editar o texto extraído se necessário:",
+            value=texto,
+            height=150,
+            help="Faça ajustes no texto extraído se necessário"
+        )
+        if texto_editado != texto:
+            texto = texto_editado
+            st.info("📝 Texto modificado pelo usuário")
+
+# Validação de entrada
+if not texto:
+    if input_method == "✍️ Digitar texto":
+        st.warning("⚠️ Por favor, digite ou cole o texto do projeto de lei.")
+    else:
+        st.warning("⚠️ Por favor, faça upload de um arquivo ou digite o texto.")
+else:
+    # Mostrar estatísticas do texto
+    with st.expander("📊 Estatísticas do Texto"):
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Caracteres", len(texto))
+        with col2:
+            st.metric("Palavras", len(texto.split()))
+        with col3:
+            st.metric("Parágrafos", len([p for p in texto.split('\n') if p.strip()]))
+        with col4:
+            # Estimar porcentagem se encontrada
+            perc = extract_percentage(texto)
+            st.metric("% Encontrado", f"{perc}%" if perc else "N/A")
 
 # Configurações adicionais
 with st.expander("⚙️ Configurações Avançadas"):
@@ -347,7 +519,7 @@ with st.expander("⚙️ Configurações Avançadas"):
     )
 
 # Botão de análise
-if st.button("🔍 Analisar e Gerar Estudo", type="primary"):
+if st.button("🔍 Analisar e Gerar Estudo", type="primary", disabled=not texto):
     if texto:
         with st.spinner("🔄 Executando análise completa..."):
             try:
@@ -429,8 +601,14 @@ if st.button("🔍 Analisar e Gerar Estudo", type="primary"):
             except Exception as e:
                 st.error(f"❌ Erro durante a análise: {str(e)}")
                 st.error("Verifique se a API do Google está funcionando corretamente.")
+                
+                # Debug info
+                with st.expander("🔧 Informações de Debug"):
+                    st.write(f"Tipo de erro: {type(e).__name__}")
+                    st.write(f"Tamanho do texto: {len(texto)} caracteres")
+                    st.write(f"Método de entrada: {input_method}")
     else:
-        st.warning("⚠️ Por favor, cole o texto do projeto de lei antes de iniciar a análise.")
+        st.error("⚠️ Nenhum texto foi fornecido para análise.")
 
 # Footer
 st.markdown("---")
