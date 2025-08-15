@@ -465,6 +465,14 @@ st.set_page_config(
     page_icon="📊"
 )
 
+# Inicializar session state
+if 'analysis_completed' not in st.session_state:
+    st.session_state.analysis_completed = False
+if 'analysis_data' not in st.session_state:
+    st.session_state.analysis_data = {}
+if 'report_text' not in st.session_state:
+    st.session_state.report_text = ""
+
 # Header personalizado
 st.markdown("""
 <div style='text-align: center; padding: 20px;'>
