@@ -1,259 +1,441 @@
+# --- IMPORTAÇÕES E CONFIGURAÇÃO ---
+
 import streamlit as st
 from dotenv import load_dotenv
 import os
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
 import re
 import pandas as pd
 import io
+import json
 from fpdf import FPDF
 from docx import Document
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
 
 # Carregar variáveis de ambiente
-load_dotenv()
+env_path = ".env"
+load_dotenv(env_path)
 google_api_key = os.getenv("GOOGLE_API_KEY")
 
-# Verificar se a chave de API está disponível
 if not google_api_key:
-    st.error("Chave de API do Google não encontrada. Certifique-se de que a variável de ambiente GOOGLE_API_KEY está definida no arquivo .env.")
+    st.error("Chave de API do Google não encontrada. Certifique-se de definir GOOGLE_API_KEY no .env.")
     st.stop()
 
-# Configurar o modelo Gemini-Flash
-llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest", google_api_key=google_api_key, temperature=0.2)
+llm = ChatGoogleGenerativeAI(
+    model="gemini-1.5-flash-latest",
+    google_api_key=google_api_key,
+    temperature=0.2
+)
 
-# ----- Funções LangChain (mesmas do código anterior) -----
 
+# --- CHAIN 1: EXTRAÇÃO DE DADOS ---
 def get_data_extraction_chain():
-    """Cria uma cadeia LangChain para extrair dados de um texto."""
     template = """
-    Você é um assistente especializado em análise de projetos de lei e estudos de impacto financeiro.
-    Sua tarefa é extrair informações chave de um texto fornecido, especificamente para calcular o impacto financeiro de um projeto de lei que envolve despesas com pessoal.
+    Você é um especialista jurídico-financeiro que atua no apoio à administração pública para análise de projetos de lei que envolvem despesas com pessoal, conforme exige a Lei de Responsabilidade Fiscal (LRF).
+
+    Sua tarefa é analisar o texto a seguir e extrair dados estruturados que permitam a elaboração de um estudo de impacto financeiro, considerando aspectos legais, operacionais e financeiros.
 
     Texto do projeto de lei:
     {text}
 
-    Extraia as seguintes informações em formato JSON:
-    - reajuste_proposto: O percentual de reajuste salarial (ex: "5%"). Se não for explícito, use "Não especificado".
-    - tipo_proposta: Uma breve descrição da proposta (ex: "Reajuste salarial dos servidores", "Criação de novos cargos").
-    - detalhes_adicionais: Qualquer outra informação relevante para o cálculo do impacto (ex: "apenas para servidores ativos", "reajuste escalonado").
-    - setor_afetado: O setor ou grupo de servidores afetado (ex: "servidores municipais", "professores da rede municipal").
+    Extraia as seguintes informações no formato JSON. Se algum item não for encontrado, use "Não especificado":
 
-    Formato da resposta JSON:
     ```json
     {{
-      "reajuste_proposto": "",
       "tipo_proposta": "",
+      "reajuste_proposto": "",
+      "abrangencia_temporal": "",
+      "setor_afetado": "",
       "detalhes_adicionais": "",
-      "setor_afetado": ""
+      "quantitativo_envolvido": "",
+      "fonte_orcamentaria": "",
+      "condicionantes_legais": "",
+      "natureza_juridica_da_medida": ""
     }}
     ```
     """
     prompt = PromptTemplate(template=template, input_variables=["text"])
-    chain = LLMChain(llm=llm, prompt=prompt)
-    return chain
+    return LLMChain(llm=llm, prompt=prompt)
 
-def calculate_financial_impact(personnel_expenses, reajuste_percent):
-    """Calcula o impacto financeiro anual com base nas despesas e no percentual de reajuste."""
-    try:
-        reajuste_decimal = reajuste_percent / 100
-        impacto_mensal = personnel_expenses * reajuste_decimal
-        impacto_anual = impacto_mensal * 12
-        return impacto_mensal, impacto_anual
-    except (TypeError, ValueError):
-        return None, None
 
+# --- CHAIN 2: VALIDAÇÃO LEGAL ---
+def get_legal_validation_chain():
+    template = """
+    Você é um consultor jurídico com foco na Lei de Responsabilidade Fiscal (LRF).
+
+    Analise o seguinte projeto de lei e informe se ele cumpre as exigências legais para aumento de despesa com pessoal:
+
+    Texto:
+    {text}
+
+    Responda em formato JSON:
+    ```json
+    {{
+      "cumpre_lrf": "Sim" ou "Não",
+      "justificativa": "Explicação concisa sobre o motivo."
+    }}
+    ```
+    """
+    prompt = PromptTemplate(template=template, input_variables=["text"])
+    return LLMChain(llm=llm, prompt=prompt)
+
+
+# --- CHAIN 3: AJUSTES SUGERIDOS ---
+def get_adjustment_suggestion_chain():
+    template = """
+    Com base no seguinte texto de projeto de lei, sugira ajustes ou melhorias para garantir conformidade com a LRF e viabilidade financeira:
+
+    Texto:
+    {text}
+
+    Responda em formato estruturado:
+    ```json
+    {{
+      "ajustes_sugeridos": [
+        "...",
+        "..."
+      ]
+    }}
+    ```
+    """
+    prompt = PromptTemplate(template=template, input_variables=["text"])
+    return LLMChain(llm=llm, prompt=prompt)
+
+
+# --- UTILITÁRIOS ---
 def extract_percentage(text):
-    """Extrai um percentual de uma string."""
     match = re.search(r'(\d+(\.\d+)?)%', text)
     if match:
         return float(match.group(1))
     return None
 
-# ----- Funções para Geração de Documentos -----
+def calculate_financial_impact(personnel_expenses, reajuste_percent):
+    try:
+        reajuste_decimal = reajuste_percent / 100
+        impacto_mensal = personnel_expenses * reajuste_decimal
+        impacto_anual = impacto_mensal * 12
+        return impacto_mensal, impacto_anual
+    except:
+        return None, None
 
-def create_report_text(extracted_data, reajuste_percent, personnel_expenses, mensal_impact, anual_impact):
-    """Cria a string do relatório para ser usada em diferentes formatos."""
-    report_text = f"""
-    Estudo de Impacto Financeiro - Proposta de Reajuste Salarial
+def parse_llm_response(response_text):
+    """Função para extrair JSON da resposta do LLM"""
+    try:
+        # Remove markdown e espaços
+        clean_text = response_text.strip()
+        
+        # Remove ```json e ``` se existirem
+        if "```json" in clean_text:
+            start = clean_text.find("```json") + 7
+            end = clean_text.rfind("```")
+            clean_text = clean_text[start:end]
+        elif "```" in clean_text:
+            start = clean_text.find("```") + 3
+            end = clean_text.rfind("```")
+            clean_text = clean_text[start:end]
+        
+        # Parse JSON
+        return json.loads(clean_text.strip())
+    except:
+        # Se falhar, retorna um dicionário vazio
+        return {}
 
-    1. Descrição da Proposta:
-    - Tipo: {extracted_data.get('tipo_proposta', 'N/A')}
-    - Setor Afetado: {extracted_data.get('setor_afetado', 'N/A')}
-    - Detalhes Adicionais: {extracted_data.get('detalhes_adicionais', 'N/A')}
-    - Percentual de Reajuste: {reajuste_percent:.2f}%
+def create_report_text(extracted_data, validacao, sugestoes, reajuste_percent, personnel_expenses, mensal_impact, anual_impact):
+    ajustes_str = "\n- ".join(sugestoes.get("ajustes_sugeridos", [])) if sugestoes and sugestoes.get("ajustes_sugeridos") else "Nenhum ajuste sugerido."
+    return f"""
+Estudo de Impacto Financeiro - Proposta de Reajuste Salarial
 
-    2. Dados para o Cálculo:
-    - Gastos Atuais com Pessoal (Mensal): R$ {personnel_expenses:,.2f}
+1. Descrição da Proposta:
+- Tipo: {extracted_data.get('tipo_proposta', 'Não especificado')}
+- Setor Afetado: {extracted_data.get('setor_afetado', 'Não especificado')}
+- Detalhes Adicionais: {extracted_data.get('detalhes_adicionais', 'Não especificado')}
+- Percentual de Reajuste: {reajuste_percent:.2f}%
+- Abrangência Temporal: {extracted_data.get('abrangencia_temporal', 'Não especificado')}
+- Quantitativo Envolvido: {extracted_data.get('quantitativo_envolvido', 'Não especificado')}
+- Fonte Orçamentária: {extracted_data.get('fonte_orcamentaria', 'Não especificado')}
+- Condicionantes Legais: {extracted_data.get('condicionantes_legais', 'Não especificado')}
+- Natureza Jurídica: {extracted_data.get('natureza_juridica_da_medida', 'Não especificado')}
 
-    3. Resultados do Cálculo:
-    - Impacto Financeiro Mensal: R$ {mensal_impact:,.2f}
-    - Impacto Financeiro Anual: R$ {anual_impact:,.2f}
+2. Resultados do Cálculo:
+- Gastos Atuais com Pessoal: R$ {personnel_expenses:,.2f}
+- Impacto Mensal: R$ {mensal_impact:,.2f}
+- Impacto Anual: R$ {anual_impact:,.2f}
 
-    Observação: Este estudo foi elaborado com base nos dados e estimativas fornecidos e deve ser complementado com outras informações relevantes para a tomada de decisão.
+3. Validação Jurídica:
+- Cumpre LRF? {validacao.get('cumpre_lrf', 'N/A')}
+- Justificativa: {validacao.get('justificativa', 'N/A')}
+
+4. Ajustes Sugeridos:
+- {ajustes_str}
     """
-    return report_text
 
-def create_pdf_report(report_text):
-    """Gera um relatório em PDF em memória."""
+def create_pdf_report(texto):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", size=12)
-    pdf.multi_cell(0, 10, txt=report_text)
-    
-    # Salvar o PDF em um buffer de memória
-    pdf_output = io.BytesIO(pdf.output(dest='S').encode('latin1'))
+    # Codificar o texto para latin-1
+    texto_encoded = texto.encode('latin-1', 'replace').decode('latin-1')
+    pdf.multi_cell(0, 10, txt=texto_encoded)
+    pdf_output = io.BytesIO()
+    pdf_output.write(pdf.output(dest='S').encode('latin1'))
+    pdf_output.seek(0)
     return pdf_output.getvalue()
 
-def create_word_report(report_text):
-    """Gera um relatório em Word em memória."""
-    document = Document()
-    for paragraph in report_text.strip().split('\n'):
-        if paragraph.strip():
-            document.add_paragraph(paragraph.strip())
+def create_word_report(texto):
+    doc = Document()
+    doc.add_heading('Estudo de Impacto Financeiro', 0)
     
-    # Salvar o documento em um buffer de memória
-    doc_output = io.BytesIO()
-    document.save(doc_output)
-    return doc_output.getvalue()
+    for linha in texto.strip().split('\n'):
+        if linha.strip():
+            doc.add_paragraph(linha.strip())
+    
+    output = io.BytesIO()
+    doc.save(output)
+    output.seek(0)
+    return output.getvalue()
 
-# ----- Interface do Streamlit -----
+def display_results(dados, validacao, sugestoes, reajuste, gasto_atual, impacto_mensal, impacto_anual):
+    """Função para exibir os resultados de forma amigável"""
+    
+    # Cabeçalho principal
+    st.markdown("## 📊 Resultado do Estudo de Impacto Financeiro")
+    st.markdown("---")
+    
+    # 1. Descrição da Proposta
+    st.markdown("### 📝 Descrição da Proposta")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.info(f"**Tipo:** {dados.get('tipo_proposta', 'Não especificado')}")
+        st.info(f"**Setor Afetado:** {dados.get('setor_afetado', 'Não especificado')}")
+        st.info(f"**Percentual de Reajuste:** {reajuste:.2f}%")
+        st.info(f"**Abrangência Temporal:** {dados.get('abrangencia_temporal', 'Não especificado')}")
+        st.info(f"**Quantitativo Envolvido:** {dados.get('quantitativo_envolvido', 'Não especificado')}")
+    
+    with col2:
+        st.info(f"**Fonte Orçamentária:** {dados.get('fonte_orcamentaria', 'Não especificado')}")
+        st.info(f"**Condicionantes Legais:** {dados.get('condicionantes_legais', 'Não especificado')}")
+        st.info(f"**Natureza Jurídica:** {dados.get('natureza_juridica_da_medida', 'Não especificado')}")
+    
+    if dados.get('detalhes_adicionais') and dados.get('detalhes_adicionais') != 'Não especificado':
+        st.markdown("**Detalhes Adicionais:**")
+        st.write(dados.get('detalhes_adicionais'))
+    
+    st.markdown("---")
+    
+    # 2. Impacto Financeiro
+    st.markdown("### 💰 Impacto Financeiro")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric(
+            label="💼 Gastos Atuais com Pessoal",
+            value=f"R$ {gasto_atual:,.2f}"
+        )
+    
+    with col2:
+        st.metric(
+            label="📅 Impacto Mensal",
+            value=f"R$ {impacto_mensal:,.2f}",
+            delta=f"{reajuste:.2f}%"
+        )
+    
+    with col3:
+        st.metric(
+            label="📈 Impacto Anual",
+            value=f"R$ {impacto_anual:,.2f}",
+            delta=f"R$ {impacto_anual:,.2f}"
+        )
+    
+    # Gráfico de pizza para visualização
+    df_impacto = pd.DataFrame({
+        'Categoria': ['Gasto Atual', 'Impacto do Reajuste'],
+        'Valor': [gasto_atual, impacto_anual]
+    })
+    
+    st.markdown("#### 📊 Visualização do Impacto")
+    st.bar_chart(df_impacto.set_index('Categoria'))
+    
+    st.markdown("---")
+    
+    # 3. Validação Jurídica
+    st.markdown("### ⚖️ Validação Jurídica")
+    
+    cumpre_lrf = validacao.get('cumpre_lrf', 'N/A')
+    
+    if cumpre_lrf.lower() == 'sim':
+        st.success(f"✅ **Cumpre LRF:** {cumpre_lrf}")
+    elif cumpre_lrf.lower() == 'não':
+        st.error(f"❌ **Cumpre LRF:** {cumpre_lrf}")
+    else:
+        st.warning(f"⚠️ **Cumpre LRF:** {cumpre_lrf}")
+    
+    if validacao.get('justificativa'):
+        st.markdown("**Justificativa:**")
+        st.write(validacao.get('justificativa'))
+    
+    st.markdown("---")
+    
+    # 4. Sugestões de Ajustes
+    st.markdown("### 💡 Sugestões de Ajustes")
+    
+    if sugestoes and sugestoes.get('ajustes_sugeridos'):
+        for i, ajuste in enumerate(sugestoes.get('ajustes_sugeridos'), 1):
+            st.markdown(f"**{i}.** {ajuste}")
+    else:
+        st.success("✅ Nenhum ajuste necessário identificado.")
+    
+    st.markdown("---")
 
-st.set_page_config(page_title="Gerador de Estudo de Impacto Financeiro", layout="wide")
-st.image("logo_app.png", width=100)
-st.title("Sistema de Estudo de Impacto Financeiro")
-st.markdown("### Objetivo do Sistema")
-st.write("Criar uma ferramenta que auxilie a administração pública na elaboração de estudos de impacto financeiro exigidos pela Lei de Responsabilidade Fiscal.")
+
+# --- STREAMLIT ---
+st.set_page_config(
+    page_title="Estudo de Impacto Financeiro", 
+    layout="wide",
+    page_icon="📊"
+)
+
+# Header personalizado
+st.markdown("""
+<div style='text-align: center; padding: 20px;'>
+    <h1 style='color: #2e7d32;'>📊 Sistema de Estudo de Impacto Financeiro</h1>
+    <p style='font-size: 18px; color: #666;'>Análise automática de projetos de lei conforme a Lei de Responsabilidade Fiscal (LRF)</p>
+</div>
+""", unsafe_allow_html=True)
 
 st.markdown("---")
 
-st.markdown("### 1. Leitura e Interpretação Automática de Textos Legais")
-with st.container():
-    project_text = st.text_area(
-        "Cole o texto do projeto de lei aqui:",
-        height=250,
-        placeholder="Ex: 'O reajuste de 5% nos vencimentos dos servidores públicos municipais será concedido a partir de 1º de janeiro de 2026.'"
+# Sidebar com informações
+with st.sidebar:
+    st.markdown("## ℹ️ Sobre o Sistema")
+    st.markdown("""
+    Este sistema realiza:
+    - ✅ Extração automática de dados
+    - ⚖️ Validação jurídica (LRF)
+    - 📊 Cálculo de impacto financeiro
+    - 💡 Sugestões de ajustes
+    - 📄 Geração de relatórios
+    """)
+    
+    st.markdown("## 📋 Como usar")
+    st.markdown("""
+    1. Cole o texto do projeto de lei
+    2. Informe o gasto atual com pessoal
+    3. Clique em "Analisar"
+    4. Baixe os relatórios se necessário
+    """)
+
+# Input principal
+st.markdown("## 📝 Entrada de Dados")
+
+texto = st.text_area(
+    "Cole aqui o texto do projeto de lei:", 
+    height=200,
+    help="Cole o texto completo do projeto de lei que você deseja analisar"
+)
+
+# Configurações adicionais
+with st.expander("⚙️ Configurações Avançadas"):
+    gasto_atual = st.number_input(
+        "Gasto Atual com Pessoal (R$):", 
+        value=10000000.0, 
+        step=10000.0,
+        help="Informe o valor atual gasto com pessoal para cálculo do impacto"
     )
-    
-    if st.button("Analisar Texto"):
-        if project_text:
-            with st.spinner("Analisando o texto..."):
-                try:
-                    extraction_chain = get_data_extraction_chain()
-                    result = extraction_chain.run(text=project_text)
-                    
-                    try:
-                        extracted_data = eval(result.strip("`json\n`"))
-                    except:
-                        st.warning("Não foi possível extrair os dados em formato JSON. Exibindo o texto bruto.")
-                        extracted_data = {"reajuste_proposto": result, "tipo_proposta": "Não especificado", "detalhes_adicionais": "Não especificado", "setor_afetado": "Não especificado"}
-                    
-                    st.session_state['extracted_data'] = extracted_data
-                    
-                except Exception as e:
-                    st.error(f"Ocorreu um erro na análise: {e}")
-        else:
-            st.warning("Por favor, cole um texto para análise.")
 
-if 'extracted_data' in st.session_state:
-    st.markdown("### 2. Dados Relevantes Extraídos")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.info("Reajuste Proposto: " + st.session_state['extracted_data'].get('reajuste_proposto', 'N/A'))
-        st.info("Tipo de Proposta: " + st.session_state['extracted_data'].get('tipo_proposta', 'N/A'))
-    with col2:
-        st.info("Setor Afetado: " + st.session_state['extracted_data'].get('setor_afetado', 'N/A'))
-        st.info("Detalhes Adicionais: " + st.session_state['extracted_data'].get('detalhes_adicionais', 'N/A'))
-
-    st.markdown("---")
-
-    st.markdown("### 3. Cálculo do Impacto Financeiro")
-    st.write("Preencha os dados abaixo para calcular o impacto financeiro.")
-
-    reajuste_extracted_percent = extract_percentage(st.session_state['extracted_data'].get('reajuste_proposto', '0%'))
-    
-    col3, col4 = st.columns(2)
-    with col3:
-        personnel_expenses = st.number_input(
-            "Gastos Atuais com Pessoal (R$ - valor mensal):", 
-            min_value=0.0, 
-            value=10000000.0, 
-            step=10000.0,
-            help="Despesa mensal total com pessoal, incluindo salários, encargos, etc."
-        )
-    with col4:
-        reajuste_manual_percent = st.number_input(
-            "Percentual de Reajuste Proposto (%):", 
-            min_value=0.0, 
-            max_value=100.0, 
-            value=reajuste_extracted_percent or 5.0,
-            step=0.1
-        )
-    
-    st.markdown("---")
-    st.markdown("### 5. Geração de Relatório")
-    if st.button("Calcular Impacto e Gerar Relatórios"):
-        if personnel_expenses > 0 and reajuste_manual_percent is not None:
-            mensal_impact, anual_impact = calculate_financial_impact(personnel_expenses, reajuste_manual_percent)
-            
-            if mensal_impact is not None:
-                st.markdown("#### Resultado do Estudo de Impacto Financeiro")
-                st.success("Cálculo realizado com sucesso!")
-
-                report_data = {
-                    "Item": ["Percentual de Reajuste", "Gastos Atuais com Pessoal (Mensal)", "Impacto Financeiro Mensal", "Impacto Financeiro Anual"],
-                    "Valor": [
-                        f"{reajuste_manual_percent:.2f}%",
-                        f"R$ {personnel_expenses:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."),
-                        f"R$ {mensal_impact:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."),
-                        f"R$ {anual_impact:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-                    ]
-                }
+# Botão de análise
+if st.button("🔍 Analisar e Gerar Estudo", type="primary"):
+    if texto:
+        with st.spinner("🔄 Executando análise completa..."):
+            try:
+                # Executar as chains
+                progress_bar = st.progress(0)
                 
-                df_report = pd.DataFrame(report_data)
-                st.table(df_report.set_index('Item'))
+                # Chain 1 - Extração de dados
+                st.write("📝 Extraindo dados do projeto...")
+                progress_bar.progress(25)
+                dados_response = get_data_extraction_chain().run(text=texto)
+                dados = parse_llm_response(dados_response)
                 
-                # Gerar texto do relatório
-                report_text = create_report_text(
-                    st.session_state['extracted_data'],
-                    reajuste_manual_percent,
-                    personnel_expenses,
-                    mensal_impact,
-                    anual_impact
+                # Chain 2 - Validação legal
+                st.write("⚖️ Realizando validação jurídica...")
+                progress_bar.progress(50)
+                validacao_response = get_legal_validation_chain().run(text=texto)
+                validacao = parse_llm_response(validacao_response)
+                
+                # Chain 3 - Sugestões
+                st.write("💡 Gerando sugestões de ajustes...")
+                progress_bar.progress(75)
+                sugestoes_response = get_adjustment_suggestion_chain().run(text=texto)
+                sugestoes = parse_llm_response(sugestoes_response)
+                
+                # Cálculos
+                st.write("📊 Calculando impacto financeiro...")
+                progress_bar.progress(100)
+                
+                reajuste = extract_percentage(dados.get("reajuste_proposto", "0%")) or 5.0
+                impacto_mensal, impacto_anual = calculate_financial_impact(gasto_atual, reajuste)
+                
+                # Exibir resultados
+                display_results(dados, validacao, sugestoes, reajuste, gasto_atual, impacto_mensal, impacto_anual)
+                
+                # Botões de download
+                st.markdown("## 📥 Downloads")
+                
+                texto_relatorio = create_report_text(
+                    dados, validacao, sugestoes, reajuste, 
+                    gasto_atual, impacto_mensal, impacto_anual
                 )
-
-                st.markdown("---")
-                col_pdf, col_word = st.columns(2)
-
-                # Botão de download PDF
-                with col_pdf:
-                    pdf_bytes = create_pdf_report(report_text)
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
                     st.download_button(
-                        label="⬇️ Baixar Relatório em PDF",
-                        data=pdf_bytes,
-                        file_name="Estudo_Impacto_Financeiro.pdf",
+                        label="📄 Baixar PDF",
+                        data=create_pdf_report(texto_relatorio),
+                        file_name="relatorio_impacto.pdf",
                         mime="application/pdf"
                     )
                 
-                # Botão de download DOCX
-                with col_word:
-                    word_bytes = create_word_report(report_text)
+                with col2:
                     st.download_button(
-                        label="⬇️ Baixar Relatório em Word",
-                        data=word_bytes,
-                        file_name="Estudo_Impacto_Financeiro.docx",
+                        label="📝 Baixar Word",
+                        data=create_word_report(texto_relatorio),
+                        file_name="relatorio_impacto.docx",
                         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                     )
+                
+                with col3:
+                    st.download_button(
+                        label="📊 Baixar Dados (JSON)",
+                        data=json.dumps({
+                            "dados": dados,
+                            "validacao": validacao,
+                            "sugestoes": sugestoes,
+                            "impacto_financeiro": {
+                                "reajuste_percent": reajuste,
+                                "gasto_atual": gasto_atual,
+                                "impacto_mensal": impacto_mensal,
+                                "impacto_anual": impacto_anual
+                            }
+                        }, indent=2, ensure_ascii=False),
+                        file_name="dados_analise.json",
+                        mime="application/json"
+                    )
+                
+            except Exception as e:
+                st.error(f"❌ Erro durante a análise: {str(e)}")
+                st.error("Verifique se a API do Google está funcionando corretamente.")
+    else:
+        st.warning("⚠️ Por favor, cole o texto do projeto de lei antes de iniciar a análise.")
 
-            else:
-                st.error("Erro no cálculo. Verifique os valores inseridos.")
-
-# Rodar a aplicação
-if __name__ == '__main__':
-    st.markdown("---")
-    st.markdown("#### Funções-Chave Esperadas")
-    st.markdown("1. Leitura e interpretação automática de textos legais")
-    st.markdown("2. Extração de dados relevantes")
-    st.markdown("3. Cálculo do impacto financeiro")
-    st.markdown("4. Flexibilidade para casos simples e complexos")
-    st.markdown("5. Geração de relatório pronto para envio")
+# Footer
+st.markdown("---")
+st.markdown("""
+<div style='text-align: center; color: #666; padding: 20px;'>
+    <small>Sistema de Análise de Impacto Financeiro | Desenvolvido para auxiliar na análise de projetos de lei conforme a LRF</small>
+</div>
+""", unsafe_allow_html=True)
